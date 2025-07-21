@@ -43,7 +43,7 @@ show_help() {
     echo ""
     echo "  Paralelný port:"
     echo "    $0 -w 100 -p /dev/lp0"
-    echo "    $0 -f dokument.txt -p /dev/lp1"
+    echo "    $0 -f dokument.txt -p /dev/usb/lp0"
     echo ""
     echo "  Sériový port:"
     echo "    $0 -w 200 -s /dev/ttyS0 -b 9600"
@@ -130,6 +130,87 @@ get_usb_device_info() {
     echo "$usb_info"
 }
 
+# Funkcia na získanie informácií o USB paralelnom porte
+get_usb_parallel_info() {
+    local device_path="$1"
+    local device_name=$(basename "$device_path")
+    local usb_info=""
+    local vendor_id=""
+    local product_id=""
+    local manufacturer=""
+    local product=""
+    local serial=""
+    
+    # Pokus o získanie informácií cez udev pre paralelné porty
+    if command -v udevadm >/dev/null 2>&1; then
+        local udev_info=$(udevadm info --name="$device_path" 2>/dev/null)
+        if [[ -n "$udev_info" ]]; then
+            vendor_id=$(echo "$udev_info" | grep "ID_VENDOR_ID=" | cut -d'=' -f2)
+            product_id=$(echo "$udev_info" | grep "ID_PRODUCT_ID=" | cut -d'=' -f2)
+            manufacturer=$(echo "$udev_info" | grep "ID_VENDOR=" | cut -d'=' -f2 | sed 's/_/ /g')
+            product=$(echo "$udev_info" | grep "ID_MODEL=" | cut -d'=' -f2 | sed 's/_/ /g')
+            serial=$(echo "$udev_info" | grep "ID_SERIAL_SHORT=" | cut -d'=' -f2)
+        fi
+    fi
+    
+    # Pokus o získanie informácií cez sys filesystem pre paralelné porty
+    if [[ -z "$manufacturer" ]] || [[ -z "$product" ]]; then
+        # Hľadanie v /sys/class/usb/
+        local sys_paths=(
+            "/sys/class/usb/$device_name/device"
+            "/sys/class/usblp/$device_name/device"
+            "/sys/class/printer/$device_name/device"
+        )
+        
+        for sys_path in "${sys_paths[@]}"; do
+            if [[ -d "$sys_path" ]]; then
+                local current_path="$sys_path"
+                while [[ "$current_path" != "/" ]] && [[ "$current_path" != "/sys" ]]; do
+                    if [[ -f "$current_path/idVendor" ]] && [[ -f "$current_path/idProduct" ]]; then
+                        vendor_id=$(cat "$current_path/idVendor" 2>/dev/null)
+                        product_id=$(cat "$current_path/idProduct" 2>/dev/null)
+                        manufacturer=$(cat "$current_path/manufacturer" 2>/dev/null)
+                        product=$(cat "$current_path/product" 2>/dev/null)
+                        serial=$(cat "$current_path/serial" 2>/dev/null)
+                        break 2
+                    fi
+                    current_path=$(dirname "$current_path")
+                done
+            fi
+        done
+    fi
+    
+    # Pokus o získanie informácií cez lsusb
+    if [[ -n "$vendor_id" ]] && [[ -n "$product_id" ]] && command -v lsusb >/dev/null 2>&1; then
+        local lsusb_info=$(lsusb -d "${vendor_id}:${product_id}" 2>/dev/null | head -1)
+        if [[ -n "$lsusb_info" ]] && [[ -z "$manufacturer" ]]; then
+            local device_desc=$(echo "$lsusb_info" | cut -d' ' -f7-)
+            if [[ -n "$device_desc" ]]; then
+                usb_info="$device_desc"
+            fi
+        fi
+    fi
+    
+    # Formátovanie výstupu
+    if [[ -n "$manufacturer" ]] && [[ -n "$product" ]]; then
+        usb_info="$manufacturer $product"
+    elif [[ -n "$usb_info" ]]; then
+        # Už nastavené z lsusb
+        :
+    elif [[ -n "$vendor_id" ]] && [[ -n "$product_id" ]]; then
+        usb_info="USB Printer (${vendor_id}:${product_id})"
+    else
+        usb_info="USB paralelný port"
+    fi
+    
+    # Pridanie sériového čísla ak je dostupné
+    if [[ -n "$serial" ]]; then
+        usb_info="$usb_info [S/N: $serial]"
+    fi
+    
+    echo "$usb_info"
+}
+
 # Funkcia na kontrolu dostupnosti portu
 check_port_availability() {
     local port="$1"
@@ -159,6 +240,8 @@ list_available_ports() {
     echo "╠══════════════════════════════════════════════════════════════════════════════╣"
     
     local parallel_found=false
+    
+    # Štandardné paralelné porty /dev/lp*
     for port in /dev/lp*; do
         if [[ -e "$port" ]]; then
             parallel_found=true
@@ -167,6 +250,66 @@ list_available_ports() {
             printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "Paralelný port $port_name" "$status"
         fi
     done
+    
+    # USB paralelné porty /dev/usb/lp*
+    for port in /dev/usb/lp*; do
+        if [[ -e "$port" ]]; then
+            parallel_found=true
+            local status=$(check_port_availability "$port")
+            local port_name=$(basename "$port")
+            local usb_info=$(get_usb_parallel_info "$port")
+            printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "USB paralelný port" "$status"
+            if [[ ${#usb_info} -gt 50 ]]; then
+                # Rozdelenie dlhého textu
+                local part1=${usb_info:0:50}
+                local part2=${usb_info:50}
+                printf "║ %-15s │ %-50s │\n" "" "$part1"
+                printf "║ %-15s │ %-50s │\n" "" "$part2"
+            else
+                printf "║ %-15s │ %-50s │\n" "" "$usb_info"
+            fi
+        fi
+    done
+    
+    # Ďalšie možné umiestnenia USB paralelných portov
+    for port in /dev/usblp*; do
+        if [[ -e "$port" ]]; then
+            parallel_found=true
+            local status=$(check_port_availability "$port")
+            local port_name=$(basename "$port")
+            local usb_info=$(get_usb_parallel_info "$port")
+            printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "USB tlačiareň" "$status"
+            if [[ ${#usb_info} -gt 50 ]]; then
+                local part1=${usb_info:0:50}
+                local part2=${usb_info:50}
+                printf "║ %-15s │ %-50s │\n" "" "$part1"
+                printf "║ %-15s │ %-50s │\n" "" "$part2"
+            else
+                printf "║ %-15s │ %-50s │\n" "" "$usb_info"
+            fi
+        fi
+    done
+    
+    # Kontrola /dev/printer/* (niektoré distribúcie)
+    if [[ -d "/dev/printer" ]]; then
+        for port in /dev/printer/*; do
+            if [[ -e "$port" ]]; then
+                parallel_found=true
+                local status=$(check_port_availability "$port")
+                local port_name=$(basename "$port")
+                local usb_info=$(get_usb_parallel_info "$port")
+                printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "USB tlačiareň" "$status"
+                if [[ ${#usb_info} -gt 50 ]]; then
+                    local part1=${usb_info:0:50}
+                    local part2=${usb_info:50}
+                    printf "║ %-15s │ %-50s │\n" "" "$part1"
+                    printf "║ %-15s │ %-50s │\n" "" "$part2"
+                else
+                    printf "║ %-15s │ %-50s │\n" "" "$usb_info"
+                fi
+            fi
+        done
+    fi
     
     if [[ "$parallel_found" == false ]]; then
         echo "║ Žiadne paralelné porty neboli nájdené                                       ║"
@@ -267,6 +410,9 @@ list_available_ports() {
     echo "║ Pre sériové porty:                                                          ║"
     echo "║   sudo usermod -a -G dialout \$USER                                         ║"
     echo "║                                                                              ║"
+    echo "║ Pre USB zariadenia (ak je potrebné):                                        ║"
+    echo "║   sudo usermod -a -G plugdev \$USER                                         ║"
+    echo "║                                                                              ║"
     echo "║ Po pridaní do skupiny sa odhláste a znovu prihláste.                       ║"
     echo "╚══════════════════════════════════════════════════════════════════════════════╝"
     
@@ -274,20 +420,26 @@ list_available_ports() {
     if command -v lsusb >/dev/null 2>&1; then
         echo ""
         echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-        echo "║                          VŠETKY USB ZARIADENIA                              ║"
+        echo "║                     USB ZARIADENIA SÚVISIACE S TLAČOU                      ║"
         echo "╚══════════════════════════════════════════════════════════════════════════════╝"
         
+        # Hľadanie tlačiarní a sériových adaptérov
         lsusb | while read -r line; do
-            # Kontrola či je to sériové zariadenie
-            local bus_device=$(echo "$line" | awk '{print $2 $4}' | tr -d ':')
             local vendor_product=$(echo "$line" | awk '{print $6}')
             local description=$(echo "$line" | cut -d' ' -f7-)
             
-            # Hľadanie známych výrobcov sériových adaptérov
-            if echo "$description" | grep -qi "serial\|uart\|ftdi\|prolific\|cp210\|ch340\|arduino"; then
+            # Hľadanie známych výrobcov a typov zariadení
+            if echo "$description" | grep -qi "printer\|canon\|hp\|epson\|brother\|lexmark\|samsung\|xerox"; then
+                printf "🖨️  %s - %s\n" "$vendor_product" "$description"
+            elif echo "$description" | grep -qi "serial\|uart\|ftdi\|prolific\|cp210\|ch340\|arduino\|usb.*serial"; then
                 printf "🔌 %s - %s\n" "$vendor_product" "$description"
             fi
         done
+        
+        echo ""
+        echo "Poznámka: Nie všetky USB zariadenia musia mať vytvorené /dev súbory."
+        echo "Pre niektoré USB tlačiarne môže byť potrebné použiť CUPS alebo iné"
+        echo "tlačové systémy namiesto priameho prístupu k portu."
     fi
 }
 
@@ -382,7 +534,7 @@ load_file_content() {
 detect_port_type() {
     local port="$1"
     
-    if [[ "$port" =~ ^/dev/lp[0-9]+$ ]]; then
+    if [[ "$port" =~ ^/dev/(lp[0-9]+|usb/lp[0-9]+|usblp[0-9]+)$ ]]; then
         echo "parallel"
     elif [[ "$port" =~ ^/dev/tty(S[0-9]+|USB[0-9]+|ACM[0-9]+|AMA[0-9]+)$ ]]; then
         echo "serial"
@@ -398,7 +550,7 @@ check_parallel_port() {
     if [[ ! -e "$port" ]]; then
         echo "Chyba: Paralelný port $port neexistuje!" >&2
         echo "Dostupné paralelné porty:" >&2
-        ls -la /dev/lp* 2>/dev/null || echo "Žiadne paralelné porty neboli nájdené" >&2
+        ls -la /dev/lp* /dev/usb/lp* /dev/usblp* 2>/dev/null || echo "Žiadne paralelné porty neboli nájdené" >&2
         echo "Použite './lorem_printer.sh --list-ports' pre detailný zoznam." >&2
         return 1
     fi
