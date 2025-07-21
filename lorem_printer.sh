@@ -34,9 +34,13 @@ show_help() {
     echo "VŠEOBECNÉ:"
     echo "  -t, --timeout SEKUNDY    Timeout pre sériový port (predvolené: 5)"
     echo "  -v, --verbose            Podrobný výstup"
+    echo "  -l, --list-ports         Zobrazí zoznam dostupných portov"
     echo "  -h, --help              Zobrazí túto nápovedu"
     echo ""
     echo "PRÍKLADY:"
+    echo "  Zoznam portov:"
+    echo "    $0 --list-ports"
+    echo ""
     echo "  Paralelný port:"
     echo "    $0 -w 100 -p /dev/lp0"
     echo "    $0 -f dokument.txt -p /dev/lp1"
@@ -49,6 +53,242 @@ show_help() {
     echo "  USB sériové adaptéry:"
     echo "    $0 -f dokument.txt -s /dev/ttyUSB0"
     echo "    $0 -s /dev/ttyACM0 -b 38400"
+}
+
+# Funkcia na získanie informácií o USB zariadení
+get_usb_device_info() {
+    local device_path="$1"
+    local device_name=$(basename "$device_path")
+    local usb_info=""
+    local vendor_id=""
+    local product_id=""
+    local manufacturer=""
+    local product=""
+    local serial=""
+    
+    # Pokus o získanie informácií cez udev
+    if command -v udevadm >/dev/null 2>&1; then
+        local udev_info=$(udevadm info --name="$device_path" 2>/dev/null)
+        if [[ -n "$udev_info" ]]; then
+            vendor_id=$(echo "$udev_info" | grep "ID_VENDOR_ID=" | cut -d'=' -f2)
+            product_id=$(echo "$udev_info" | grep "ID_PRODUCT_ID=" | cut -d'=' -f2)
+            manufacturer=$(echo "$udev_info" | grep "ID_VENDOR=" | cut -d'=' -f2 | sed 's/_/ /g')
+            product=$(echo "$udev_info" | grep "ID_MODEL=" | cut -d'=' -f2 | sed 's/_/ /g')
+            serial=$(echo "$udev_info" | grep "ID_SERIAL_SHORT=" | cut -d'=' -f2)
+        fi
+    fi
+    
+    # Pokus o získanie informácií cez sys filesystem
+    if [[ -z "$manufacturer" ]] || [[ -z "$product" ]]; then
+        local sys_path="/sys/class/tty/$device_name/device"
+        if [[ -d "$sys_path" ]]; then
+            # Hľadanie USB zariadenia v hierarchii
+            local current_path="$sys_path"
+            while [[ "$current_path" != "/" ]] && [[ "$current_path" != "/sys" ]]; do
+                if [[ -f "$current_path/idVendor" ]] && [[ -f "$current_path/idProduct" ]]; then
+                    vendor_id=$(cat "$current_path/idVendor" 2>/dev/null)
+                    product_id=$(cat "$current_path/idProduct" 2>/dev/null)
+                    manufacturer=$(cat "$current_path/manufacturer" 2>/dev/null)
+                    product=$(cat "$current_path/product" 2>/dev/null)
+                    serial=$(cat "$current_path/serial" 2>/dev/null)
+                    break
+                fi
+                current_path=$(dirname "$current_path")
+            done
+        fi
+    fi
+    
+    # Pokus o získanie informácií cez lsusb
+    if [[ -n "$vendor_id" ]] && [[ -n "$product_id" ]] && command -v lsusb >/dev/null 2>&1; then
+        local lsusb_info=$(lsusb -d "${vendor_id}:${product_id}" 2>/dev/null | head -1)
+        if [[ -n "$lsusb_info" ]] && [[ -z "$manufacturer" ]]; then
+            # Extrahovanie názvu z lsusb výstupu
+            local device_desc=$(echo "$lsusb_info" | cut -d' ' -f7-)
+            if [[ -n "$device_desc" ]]; then
+                usb_info="$device_desc"
+            fi
+        fi
+    fi
+    
+    # Formátovanie výstupu
+    if [[ -n "$manufacturer" ]] && [[ -n "$product" ]]; then
+        usb_info="$manufacturer $product"
+    elif [[ -n "$usb_info" ]]; then
+        # Už nastavené z lsusb
+        :
+    elif [[ -n "$vendor_id" ]] && [[ -n "$product_id" ]]; then
+        usb_info="USB Device (${vendor_id}:${product_id})"
+    else
+        usb_info="Neznáme USB zariadenie"
+    fi
+    
+    # Pridanie sériového čísla ak je dostupné
+    if [[ -n "$serial" ]]; then
+        usb_info="$usb_info [S/N: $serial]"
+    fi
+    
+    echo "$usb_info"
+}
+
+# Funkcia na kontrolu dostupnosti portu
+check_port_availability() {
+    local port="$1"
+    local status="❌ Nedostupný"
+    
+    if [[ -e "$port" ]]; then
+        if [[ -r "$port" ]] && [[ -w "$port" ]]; then
+            status="✅ Dostupný"
+        elif [[ -r "$port" ]] || [[ -w "$port" ]]; then
+            status="⚠️  Čiastočne dostupný"
+        else
+            status="🔒 Bez oprávnení"
+        fi
+    fi
+    
+    echo "$status"
+}
+
+# Funkcia na zobrazenie zoznamu portov
+list_available_ports() {
+    echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+    echo "║                            DOSTUPNÉ PORTY PRE TLAČ                          ║"
+    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
+    
+    # Paralelné porty
+    echo "║ PARALELNÉ PORTY                                                              ║"
+    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
+    
+    local parallel_found=false
+    for port in /dev/lp*; do
+        if [[ -e "$port" ]]; then
+            parallel_found=true
+            local status=$(check_port_availability "$port")
+            local port_name=$(basename "$port")
+            printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "Paralelný port $port_name" "$status"
+        fi
+    done
+    
+    if [[ "$parallel_found" == false ]]; then
+        echo "║ Žiadne paralelné porty neboli nájdené                                       ║"
+    fi
+    
+    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
+    echo "║ SÉRIOVÉ PORTY                                                                ║"
+    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
+    
+    local serial_found=false
+    
+    # Štandardné sériové porty
+    for port in /dev/ttyS*; do
+        if [[ -e "$port" ]]; then
+            serial_found=true
+            local status=$(check_port_availability "$port")
+            local port_name=$(basename "$port")
+            local port_num=${port_name#ttyS}
+            printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "Sériový port COM$((port_num + 1))" "$status"
+        fi
+    done
+    
+    # USB sériové adaptéry
+    for port in /dev/ttyUSB*; do
+        if [[ -e "$port" ]]; then
+            serial_found=true
+            local status=$(check_port_availability "$port")
+            local port_name=$(basename "$port")
+            local usb_info=$(get_usb_device_info "$port")
+            printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "USB-Serial adaptér" "$status"
+            if [[ ${#usb_info} -gt 50 ]]; then
+                # Rozdelenie dlhého textu
+                local part1=${usb_info:0:50}
+                local part2=${usb_info:50}
+                printf "║ %-15s │ %-50s │\n" "" "$part1"
+                printf "║ %-15s │ %-50s │\n" "" "$part2"
+            else
+                printf "║ %-15s │ %-50s │\n" "" "$usb_info"
+            fi
+        fi
+    done
+    
+    # USB CDC zariadenia (Arduino, ESP32, atď.)
+    for port in /dev/ttyACM*; do
+        if [[ -e "$port" ]]; then
+            serial_found=true
+            local status=$(check_port_availability "$port")
+            local port_name=$(basename "$port")
+            local usb_info=$(get_usb_device_info "$port")
+            printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "USB CDC zariadenie" "$status"
+            if [[ ${#usb_info} -gt 50 ]]; then
+                local part1=${usb_info:0:50}
+                local part2=${usb_info:50}
+                printf "║ %-15s │ %-50s │\n" "" "$part1"
+                printf "║ %-15s │ %-50s │\n" "" "$part2"
+            else
+                printf "║ %-15s │ %-50s │\n" "" "$usb_info"
+            fi
+        fi
+    done
+    
+    # ARM sériové porty (Raspberry Pi)
+    for port in /dev/ttyAMA*; do
+        if [[ -e "$port" ]]; then
+            serial_found=true
+            local status=$(check_port_availability "$port")
+            local port_name=$(basename "$port")
+            printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "ARM sériový port" "$status"
+        fi
+    done
+    
+    # Bluetooth sériové porty
+    for port in /dev/rfcomm*; do
+        if [[ -e "$port" ]]; then
+            serial_found=true
+            local status=$(check_port_availability "$port")
+            local port_name=$(basename "$port")
+            printf "║ %-15s │ %-20s │ %-35s ║\n" "$port" "Bluetooth sériový" "$status"
+        fi
+    done
+    
+    if [[ "$serial_found" == false ]]; then
+        echo "║ Žiadne sériové porty neboli nájdené                                         ║"
+    fi
+    
+    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
+    echo "║ LEGENDA                                                                      ║"
+    echo "║ ✅ Dostupný        - Port existuje a máte oprávnenia na čítanie/zápis       ║"
+    echo "║ ⚠️  Čiastočne      - Port existuje, ale máte len čiastočné oprávnenia       ║"
+    echo "║ 🔒 Bez oprávnení   - Port existuje, ale nemáte oprávnenia                   ║"
+    echo "║ ❌ Nedostupný      - Port neexistuje                                         ║"
+    echo "╠══════════════════════════════════════════════════════════════════════════════╣"
+    echo "║ RIEŠENIE PROBLÉMOV S OPRÁVNENIAMI                                           ║"
+    echo "║                                                                              ║"
+    echo "║ Pre paralelné porty:                                                        ║"
+    echo "║   sudo usermod -a -G lp \$USER                                               ║"
+    echo "║                                                                              ║"
+    echo "║ Pre sériové porty:                                                          ║"
+    echo "║   sudo usermod -a -G dialout \$USER                                         ║"
+    echo "║                                                                              ║"
+    echo "║ Po pridaní do skupiny sa odhláste a znovu prihláste.                       ║"
+    echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+    
+    # Dodatočné informácie o USB zariadeniach
+    if command -v lsusb >/dev/null 2>&1; then
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════════════════════════╗"
+        echo "║                          VŠETKY USB ZARIADENIA                              ║"
+        echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+        
+        lsusb | while read -r line; do
+            # Kontrola či je to sériové zariadenie
+            local bus_device=$(echo "$line" | awk '{print $2 $4}' | tr -d ':')
+            local vendor_product=$(echo "$line" | awk '{print $6}')
+            local description=$(echo "$line" | cut -d' ' -f7-)
+            
+            # Hľadanie známych výrobcov sériových adaptérov
+            if echo "$description" | grep -qi "serial\|uart\|ftdi\|prolific\|cp210\|ch340\|arduino"; then
+                printf "🔌 %s - %s\n" "$vendor_product" "$description"
+            fi
+        done
+    fi
 }
 
 # Funkcia na generovanie Lorem Ipsum textu
@@ -159,6 +399,7 @@ check_parallel_port() {
         echo "Chyba: Paralelný port $port neexistuje!" >&2
         echo "Dostupné paralelné porty:" >&2
         ls -la /dev/lp* 2>/dev/null || echo "Žiadne paralelné porty neboli nájdené" >&2
+        echo "Použite './lorem_printer.sh --list-ports' pre detailný zoznam." >&2
         return 1
     fi
     
@@ -180,6 +421,7 @@ check_serial_port() {
         echo "Chyba: Sériový port $port neexistuje!" >&2
         echo "Dostupné sériové porty:" >&2
         ls -la /dev/tty{S,USB,ACM}* 2>/dev/null || echo "Žiadne sériové porty neboli nájdené" >&2
+        echo "Použite './lorem_printer.sh --list-ports' pre detailný zoznam." >&2
         return 1
     fi
     
@@ -365,6 +607,7 @@ STOP_BITS=1
 FLOW_CONTROL="none"
 TIMEOUT=5
 VERBOSE=false
+LIST_PORTS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -475,6 +718,10 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
+        -l|--list-ports)
+            LIST_PORTS=true
+            shift
+            ;;
         -h|--help)
             show_help
             exit 0
@@ -487,9 +734,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Ak je požadovaný zoznam portov, zobraz ho a skonči
+if [[ "$LIST_PORTS" == true ]]; then
+    list_available_ports
+    exit 0
+fi
+
 # Validácia argumentov
 if [[ -z "$PARALLEL_PORT" ]] && [[ -z "$SERIAL_PORT" ]]; then
     echo "Chyba: Musíte špecifikovať buď paralelný (-p) alebo sériový (-s) port!" >&2
+    echo "Použite './lorem_printer.sh --list-ports' pre zobrazenie dostupných portov." >&2
     exit 1
 fi
 
