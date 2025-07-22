@@ -7,7 +7,7 @@ Program na testovanie tlačiarní ktoré používajú paralelné a sériové roz
 
 
 ZÁVYSLOSTI : 
----------------
+
 
 
 
